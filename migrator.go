@@ -109,7 +109,7 @@ func (m Migrator) MigrateColumnUnique(value interface{}, field *schema.Field, co
 					return err
 				}
 			}
-			if field.UniqueIndex != "" && !queryTx.Migrator().HasIndex(value, field.UniqueIndex) {
+			if field.UniqueIndex != "" {
 				if err := execTx.Migrator().CreateIndex(value, field.UniqueIndex); err != nil {
 					return err
 				}
@@ -231,17 +231,21 @@ func (m Migrator) DropConstraint(value interface{}, name string) error {
 
 	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		constraint, table := m.GuessConstraintInterfaceAndTable(stmt, name)
+		_ = table
 		if constraint != nil {
 			name = constraint.GetName()
 			switch constraint.(type) {
 			case *schema.Constraint:
-				return m.DB.Exec("ALTER TABLE ? DROP FOREIGN KEY ?", clause.Table{Name: table}, clause.Column{Name: name}).Error
+				//return m.DB.Exec("ALTER TABLE ? DROP FOREIGN KEY ?", clause.Table{Name: table}, clause.Column{Name: name}).Error
+				return m.DB.Exec("ALTER TABLE ? DROP FOREIGN KEY ?", m.CurrentTable(stmt), clause.Column{Name: name}).Error
 			case *schema.CheckConstraint:
-				return m.DB.Exec("ALTER TABLE ? DROP CHECK ?", clause.Table{Name: table}, clause.Column{Name: name}).Error
+				//return m.DB.Exec("ALTER TABLE ? DROP CHECK ?", clause.Table{Name: table}, clause.Column{Name: name}).Error
+				return m.DB.Exec("ALTER TABLE ? DROP CHECK ?", m.CurrentTable(stmt), clause.Column{Name: name}).Error
 			}
 		}
 		if m.HasIndex(value, name) {
-			return m.DB.Exec("ALTER TABLE ? DROP INDEX ?", clause.Table{Name: table}, clause.Column{Name: name}).Error
+			//return m.DB.Exec("ALTER TABLE ? DROP INDEX ?", clause.Table{Name: table}, clause.Column{Name: name}).Error
+			return m.DB.Exec("ALTER TABLE ? DROP INDEX ?", m.CurrentTable(stmt), clause.Column{Name: name}).Error
 		}
 		return nil
 	})
@@ -311,7 +315,7 @@ func (m Migrator) ColumnTypes(value interface{}) ([]gorm.ColumnType, error) {
 		var (
 			currentDatabase, table = m.CurrentSchema(stmt, stmt.Table)
 			columnTypeSQL          = "SELECT column_name, column_default, is_nullable = 'YES', data_type, character_maximum_length, column_type, column_key, extra, column_comment, numeric_precision, numeric_scale "
-			rows, err              = m.DB.Session(&gorm.Session{}).Table(table).Limit(1).Rows()
+			rows, err              = m.DB.Session(&gorm.Session{}).Table(GetTableName(currentDatabase, table)).Limit(1).Rows()
 		)
 
 		if err != nil {
@@ -333,7 +337,7 @@ func (m Migrator) ColumnTypes(value interface{}) ([]gorm.ColumnType, error) {
 		}
 		columnTypeSQL += "FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ORDINAL_POSITION"
 
-		columns, rowErr := m.DB.Table(table).Raw(columnTypeSQL, currentDatabase, table).Rows()
+		columns, rowErr := m.DB.Table(GetTableName(currentDatabase, table)).Raw(columnTypeSQL, currentDatabase, table).Rows()
 		if rowErr != nil {
 			return rowErr
 		}
@@ -427,7 +431,7 @@ func (m Migrator) GetIndexes(value interface{}) ([]gorm.Index, error) {
 
 		result := make([]*Index, 0)
 		schema, table := m.CurrentSchema(stmt, stmt.Table)
-		scanErr := m.DB.Table(table).Raw(indexSql, schema, table).Scan(&result).Error
+		scanErr := m.DB.Table(GetTableName(schema, table)).Raw(indexSql, schema, table).Scan(&result).Error
 		if scanErr != nil {
 			return scanErr
 		}
@@ -481,8 +485,19 @@ func groupByIndexName(indexList []*Index) (map[string][]*Index, []string) {
 }
 
 func (m Migrator) CurrentSchema(stmt *gorm.Statement, table string) (string, string) {
-	if tables := strings.Split(table, `.`); len(tables) == 2 {
-		return tables[0], tables[1]
+	//if tables := strings.Split(table, `.`); len(tables) == 2 {
+	//	return tables[0], tables[1]
+	//}
+	if strings.Contains(table, ".") {
+		if tables := strings.Split(table, `.`); len(tables) == 2 {
+			return tables[0], tables[1]
+		}
+	}
+
+	if stmt.TableExpr != nil {
+		if tables := strings.Split(stmt.TableExpr.SQL, "`.`"); len(tables) == 2 {
+			return strings.TrimPrefix(tables[0], "`"), table
+		}
 	}
 	m.DB = m.DB.Table(table)
 	return m.CurrentDatabase(), table
@@ -505,7 +520,7 @@ func (m Migrator) TableType(value interface{}) (tableType gorm.TableType, err er
 			tableTypeSQL               = "SELECT table_schema, table_name, table_type, table_comment FROM information_schema.tables WHERE table_schema = ? AND table_name = ?"
 		)
 
-		row := m.DB.Table(tableName).Raw(tableTypeSQL, currentDatabase, tableName).Row()
+		row := m.DB.Table(GetTableName(currentDatabase, tableName)).Raw(tableTypeSQL, currentDatabase, tableName).Row()
 
 		if scanErr := row.Scan(values...); scanErr != nil {
 			return scanErr
